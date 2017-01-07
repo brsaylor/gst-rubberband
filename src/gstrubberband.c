@@ -23,7 +23,7 @@
  * <refsect2>
  * <title>Example launch line</title>
  * |[
- * gst-launch-1.0 ---gst-debug=rubberband:5 filesrc location=test.ogg ! decodebin ! rubberband ! autoaudiosink
+ * gst-launch-1.0 --gst-debug=rubberband:5 filesrc location=test.ogg ! decodebin ! rubberband time-ratio=1.8 pitch-scale=1.2 ! autoaudiosink
  * ]|
  * </refsect2>
  */
@@ -52,10 +52,13 @@ enum
     LAST_SIGNAL
 };
 
+// Element properties
 enum
 {
     PROP_0,
-    PROP_SILENT
+    PROP_SILENT,
+    PROP_TIME_RATIO,
+    PROP_PITCH_SCALE
 };
 
 /* the capabilities of the inputs and outputs.
@@ -119,6 +122,16 @@ static void gst_rubber_band_class_init (GstRubberBandClass * klass)
             g_param_spec_boolean ("silent", "Silent", "Produce verbose output ?",
                 FALSE, G_PARAM_READWRITE));
 
+    g_object_class_install_property (gobject_class, PROP_TIME_RATIO,
+            g_param_spec_double ("time-ratio", "Time ratio", "Ratio of stretched to unstretched duration",
+                0.1, 100.0, 1.0,
+                G_PARAM_READWRITE | GST_PARAM_CONTROLLABLE | G_PARAM_STATIC_STRINGS));
+
+    g_object_class_install_property (gobject_class, PROP_PITCH_SCALE,
+            g_param_spec_double ("pitch-scale", "Pitch scaling ratio", "Ratio of target frequency to source frequency",
+                1./4., 4.0, 1.0,
+                G_PARAM_READWRITE | GST_PARAM_CONTROLLABLE | G_PARAM_STATIC_STRINGS));
+
     gst_element_class_set_static_metadata (gstelement_class,
             "Rubber Band time stretcher",
             "Filter/Audio",
@@ -170,12 +183,12 @@ static void gst_rubber_band_init(GstRubberBand* filter)
     filter->rb_outbuf.frames_buffered = 0;
     filter->rb_outbuf.frame_capacity = 0;
 
-    filter->rate = 1.0;
-    //filter->channels = 0;
-
     // FIXME: call rubberband_delete(filter->rubberband_state) somewhere
 
+    // Initialize properties
     filter->silent = FALSE;
+    filter->time_ratio = 1.0;
+    filter->pitch_scale = 1.0;
 }
 
 static void gst_rubber_band_set_property (GObject * object, guint prop_id,
@@ -183,9 +196,22 @@ static void gst_rubber_band_set_property (GObject * object, guint prop_id,
 {
     GstRubberBand *filter = GST_RUBBERBAND (object);
 
+    // FIXME: Use a mutex so that RB properties are not set concurrently with
+    // process()
+
     switch (prop_id) {
         case PROP_SILENT:
             filter->silent = g_value_get_boolean (value);
+            break;
+        case PROP_TIME_RATIO:
+            filter->time_ratio = g_value_get_double(value);
+            if (filter->rb_state != NULL)
+                rubberband_set_time_ratio(filter->rb_state, filter->time_ratio);
+            break;
+        case PROP_PITCH_SCALE:
+            filter->pitch_scale = g_value_get_double(value);
+            if (filter->rb_state != NULL)
+                rubberband_set_pitch_scale(filter->rb_state, filter->pitch_scale);
             break;
         default:
             G_OBJECT_WARN_INVALID_PROPERTY_ID (object, prop_id, pspec);
@@ -201,6 +227,12 @@ static void gst_rubber_band_get_property (GObject * object, guint prop_id,
     switch (prop_id) {
         case PROP_SILENT:
             g_value_set_boolean (value, filter->silent);
+            break;
+        case PROP_TIME_RATIO:
+            g_value_set_double(value, filter->time_ratio);
+            break;
+        case PROP_PITCH_SCALE:
+            g_value_set_double(value, filter->pitch_scale);
             break;
         default:
             G_OBJECT_WARN_INVALID_PROPERTY_ID (object, prop_id, pspec);
@@ -248,7 +280,10 @@ static gboolean gst_rubber_band_sink_event (GstPad * pad, GstObject * parent, Gs
                         filter->info.rate, filter->info.channels,
                         RubberBandOptionProcessRealTime | RubberBandOptionThreadingNever,
                         1.0, 1.0); 
-                rubberband_set_time_ratio(filter->rb_state, 2.5);
+
+                // Initialize stretcher parameters
+                rubberband_set_time_ratio(filter->rb_state, filter->time_ratio);
+                rubberband_set_pitch_scale(filter->rb_state, filter->pitch_scale);
 
                 /* and forward */
                 ret = gst_pad_event_default (pad, parent, event);
@@ -325,6 +360,10 @@ static GstFlowReturn gst_rubber_band_chain(GstPad * pad, GstObject * parent, Gst
     gst_buffer_map(inbuf, &inbuf_info, GST_MAP_READ);
     gint channels = GST_AUDIO_INFO_CHANNELS(&filter->info);
     int input_frame_count = inbuf_info.size / channels / sizeof(float);
+
+    if (!gst_object_sync_values(parent, inbuf->pts)) {
+        GST_DEBUG_OBJECT(filter, "Failed to sync parameter values");
+    }
 
     // Allocate RB input buffer and set Rubber Band's max process size
     int required_rb_inbuf_size;

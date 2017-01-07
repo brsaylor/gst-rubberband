@@ -55,8 +55,11 @@ struct _GstRubberBand
     RubberBandState rb_state;
 
     GstRubberBandBuffer rb_inbuf, rb_outbuf;
+
+    // Rubber Band stretcher properties
+    double time_ratio;
+    double pitch_scale;
     
-    float rate;
     gint offset;
     GstAudioInfo info;
 
